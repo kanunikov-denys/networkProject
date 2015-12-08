@@ -1,0 +1,7 @@
+dht.transmissionbt.com
+router.bittorrent.com
+router.utorrent.com
+router.btdigg.org
+dht.aelitis.com
+router.bitcomet.com
+dht.transmissionbt.com
