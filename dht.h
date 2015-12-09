@@ -73,3 +73,4 @@ int get_list_stat(int lim4, struct sockaddr_in *sin, int *num, int *numbad,
                   int lim6, struct sockaddr_in6 *sin6, int *num6, int *numbad6);
 
 int explore_tree();
+int list_request();

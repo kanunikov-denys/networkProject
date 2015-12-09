@@ -338,6 +338,14 @@ main(int argc, char **argv)
         usleep(random() % 100000);
     }
    
+    int timeout_find_node;
+    timeout_find_node = 5*60;
+    
+    struct timeval tv_find_node;
+    time_t time_checked_node;
+
+    gettimeofday(&tv_find_node, NULL);
+    time_checked_node = tv_find_node.tv_sec;
 
     while(1) {
         struct timeval tv;
@@ -393,7 +401,12 @@ main(int argc, char **argv)
                 tosleep = 1;
             }
         }
-
+        gettimeofday(&tv, NULL);
+        nowtime = tv.tv_sec;
+        if (nowtime - time_checked_node > timeout_find_node){
+            time_checked_node = nowtime;
+            list_request();
+        }
         /* For debugging, or idle curiosity. */
         if(dumping) {
             dht_dump_tables(stdout);
@@ -406,13 +419,16 @@ main(int argc, char **argv)
         int lim6 = 50000;
         struct sockaddr_in sin[lim4];
         struct sockaddr_in6 sin6[lim6];
-        int num = lim4, num6 = lim6;
+        int num = lim4; int num6 = lim6;
+        int numbad =0; int numbad6 = 0;
         int i;
         char mybuf[128];
-        i = get_list_stat(lim4, lim6, sin, &num, sin6, &num6);
+        i = get_list_stat(lim4, sin, &num, &numbad, lim6, sin6, &num6, &numbad6);
         printf("Found %d (%d + %d) good nodes.\n", i, num, num6);
+        printf("Found (%d + %d) bad nodes.\n", numbad, numbad6);
         if (dht_log){
             fprintf(dht_log, "Found %d (%d + %d) good nodes.\n", i, num, num6);
+            fprintf(dht_log, "Found (%d + %d) bad nodes.\n", numbad, numbad6);
             for (i=0; i< (num % lim4); ++i){
                 printIP((struct sockaddr*)&sin[i], mybuf);
                 fprintf(dht_log, "%s\n", mybuf);

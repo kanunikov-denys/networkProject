@@ -3026,6 +3026,83 @@ parse_message(const unsigned char *buf, int buflen,
 
 /* Own implementation */
 
+/* We just learnt about a node, not necessarily a new one.  Confirm is 1 if
+   the node sent a message, 2 if it sent us a reply. */
+static struct node *
+new_node2(const unsigned char *id, const struct sockaddr *sa, int salen,
+         int confirm)
+{
+    struct node *n;
+
+    if(id_cmp(id, myid) == 0)
+        return NULL;
+
+    if(is_martian(sa) || node_blacklisted(sa, salen))
+        return NULL;
+
+    struct list_el *cur;
+    cur = head;
+    struct sockaddr_in* sa4new;
+    struct sockaddr_in* sa4cur;
+    sa4new = (struct sockaddr_in*) sa;
+    while(cur) {
+        if((id_cmp(cur->data->id, id) == 0)){
+            if(confirm || cur->data->time < now.tv_sec - 15 * 60) {
+                    /* Known node.  Update stuff. */
+                    memcpy((struct sockaddr*)&cur->data->ss, sa, salen);
+                    if(confirm)
+                        cur->data->time = now.tv_sec;
+                    if(confirm >= 2) {
+                        cur->data->reply_time = now.tv_sec;
+                        cur->data->pinged = 0;
+                        cur->data->pinged_time = now.tv_sec;
+                    }
+                }
+            return cur->data;
+        }
+        else{
+            if (cur->data->ss.ss_family == AF_INET){
+                sa4cur = (struct sockaddr_in*) &cur->data->ss;
+                if (sa4new->sin_addr.s_addr == sa4cur->sin_addr.s_addr){
+                    return cur->data;
+                }
+            }
+        }
+        cur = cur->next;
+    }
+
+    /* New node. */
+    cur = head;
+    /* Always Create a new node. to keep the statistic of bad ones*/
+    n = calloc(1, sizeof(struct node));
+    if(n == NULL)
+        return NULL;
+    memcpy(n->id, id, 20);
+    memcpy(&n->ss, sa, salen);
+    n->sslen = salen;
+    n->time = confirm ? now.tv_sec : 0;
+    n->reply_time = confirm >= 2 ? now.tv_sec : 0;
+    n->pinged_time=0;
+    n->pinged=0;
+    n->next = NULL;
+    cur = (struct list_el *)malloc(sizeof(struct list_el));
+    cur->data = n;
+    if (head == NULL){
+        head = cur;
+        tail = head;
+        head->next = NULL;
+        head->previous = NULL;
+    }
+    else{
+        cur->data = n;
+        cur->previous = tail;
+        tail->next=cur;
+        cur->next = NULL;
+        tail = cur;
+    }
+    return n;
+}
+
 ///< repeats functionality of dht_periodic
 int check_response(const void *buf, size_t buflen,
                    const struct sockaddr *from, int fromlen,
@@ -3110,7 +3187,10 @@ int check_response(const void *buf, size_t buflen,
                     char mybuf[200];
                     unsigned char id2[20];
                     memcpy(id2, myid, 20);
-                    id2[19] = random() & 0xFF;
+                    int k;
+                    for (k=0; k < 20; ++k){
+                        id2[k] = random() & 0xFF;
+                    }
                     printIP((struct sockaddr*)&n->ss, mybuf);
                     debugf("Sending find_node to explore_tree to %s.\n", mybuf);
                     make_tid(tid, "fn", 0);
@@ -3169,10 +3249,10 @@ int check_response(const void *buf, size_t buflen,
                 sr = find_search(ttid, from->sa_family);
                 if(!sr) {
                     debugf("Unknown search!\n");
-                    new_node(id, from, fromlen, 1);
+                    new_node2(id, from, fromlen, 1);
                 } else {
                     int i;
-                    new_node(id, from, fromlen, 2);
+                    new_node2(id, from, fromlen, 2);
                     for(i = 0; i < sr->numnodes; i++)
                         if(id_cmp(sr->nodes[i].id, id) == 0) {
                             sr->nodes[i].request_time = 0;
@@ -3192,73 +3272,68 @@ int check_response(const void *buf, size_t buflen,
             break;
         case PING:
             debugf("Ping (%d)!\n", tid_len);
-            new_node(id, from, fromlen, 1);
+            n = new_node2(id, from, fromlen, 1);
             debugf("Sending pong.\n");
             send_pong(from, fromlen, tid, tid_len);
+            if(n) {
+                unsigned char tid[4];
+                char mybuf[200];
+                unsigned char id2[20];
+                memcpy(id2, myid, 20);
+                int k;
+                for (k=0; k < 20; ++k){
+                    id2[k] = random() & 0xFF;
+                }
+                printIP((struct sockaddr*)&n->ss, mybuf);
+                debugf("Sending find_node to explore_tree to %s.\n", mybuf);
+                make_tid(tid, "fn", 0);
+                send_find_node((struct sockaddr*)&n->ss, n->sslen,
+                               tid, 4, id2, 3,
+                               n->reply_time >= now.tv_sec - 15);
+            }
+
             break;
         case FIND_NODE:
             debugf("Find node!\n");
-            new_node(id, from, fromlen, 1);
-            debugf("Sending closest nodes (%d).\n", want);
-            send_closest_nodes(from, fromlen,
-                               tid, tid_len, target, want,
-                               0, NULL, NULL, 0);
-            break;
-        case GET_PEERS:
-            debugf("Get_peers!\n");
-            new_node(id, from, fromlen, 1);
-            if(id_cmp(info_hash, zeroes) == 0) {
-                debugf("Eek!  Got get_peers with no info_hash.\n");
-                send_error(from, fromlen, tid, tid_len,
-                           203, "Get_peers with no info_hash");
-                break;
-            } else {
-                struct storage *st = find_storage(info_hash);
-                unsigned char token[TOKEN_SIZE];
-                make_token(from, 0, token);
-                if(st && st->numpeers > 0) {
-                    debugf("Sending found%s peers.\n",
-                           from->sa_family == AF_INET6 ? " IPv6" : "");
-                    send_closest_nodes(from, fromlen,
-                                       tid, tid_len,
-                                       info_hash, want,
-                                       from->sa_family, st,
-                                       token, TOKEN_SIZE);
-                } else {
-                    debugf("Sending nodes for get_peers.\n");
-                    send_closest_nodes(from, fromlen,
-                                       tid, tid_len, info_hash, want,
-                                       0, NULL, token, TOKEN_SIZE);
+            n = new_node2(id, from, fromlen, 1);
+            debugf("Not implemented!\n");
+            if(n) {
+                unsigned char tid[4];
+                char mybuf[200];
+                unsigned char id2[20];
+                memcpy(id2, myid, 20);
+                int k;
+                for (k=0; k < 20; ++k){
+                    id2[k] = random() & 0xFF;
                 }
+                printIP((struct sockaddr*)&n->ss, mybuf);
+                debugf("Sending find_node to explore_tree to %s.\n", mybuf);
+                make_tid(tid, "fn", 0);
+                send_find_node((struct sockaddr*)&n->ss, n->sslen,
+                               tid, 4, id2, 3,
+                               n->reply_time >= now.tv_sec - 15);
             }
             break;
         case ANNOUNCE_PEER:
             debugf("Announce peer!\n");
-            new_node(id, from, fromlen, 1);
-            if(id_cmp(info_hash, zeroes) == 0) {
-                debugf("Announce_peer with no info_hash.\n");
-                send_error(from, fromlen, tid, tid_len,
-                           203, "Announce_peer with no info_hash");
-                break;
+            n=new_node2(id, from, fromlen, 1);
+            debugf("Not implemented!\n");
+            if(n) {
+                unsigned char tid[4];
+                char mybuf[200];
+                unsigned char id2[20];
+                memcpy(id2, myid, 20);
+                int k;
+                for (k=0; k < 20; ++k){
+                    id2[k] = random() & 0xFF;
+                }
+                printIP((struct sockaddr*)&n->ss, mybuf);
+                debugf("Sending find_node to explore_tree to %s.\n", mybuf);
+                make_tid(tid, "fn", 0);
+                send_find_node((struct sockaddr*)&n->ss, n->sslen,
+                               tid, 4, id2, 3,
+                               n->reply_time >= now.tv_sec - 15);
             }
-            if(!token_match(token, token_len, from)) {
-                debugf("Incorrect token for announce_peer.\n");
-                send_error(from, fromlen, tid, tid_len,
-                           203, "Announce_peer with wrong token");
-                break;
-            }
-            if(port == 0) {
-                debugf("Announce_peer with forbidden port %d.\n", port);
-                send_error(from, fromlen, tid, tid_len,
-                           203, "Announce_peer with forbidden port number");
-                break;
-            }
-            storage_store(info_hash, from, port);
-            /* Note that if storage_store failed, we lie to the requestor.
-               This is to prevent them from backtracking, and hence
-               polluting the DHT. */
-            debugf("Sending peer announced.\n");
-            send_peer_announced(from, fromlen, tid, tid_len);
         }
     }
 
@@ -3292,73 +3367,8 @@ void printIP(const struct sockaddr* sock, char* strip)
   }
 }
 
-/* We just learnt about a node, not necessarily a new one.  Confirm is 1 if
-   the node sent a message, 2 if it sent us a reply. */
-static struct node *
-new_node2(const unsigned char *id, const struct sockaddr *sa, int salen,
-         int confirm)
-{
-    struct node *n;
-
-    if(id_cmp(id, myid) == 0)
-        return NULL;
-
-    if(is_martian(sa) || node_blacklisted(sa, salen))
-        return NULL;
-
-    struct list_el *cur;
-    cur = head;
-    while(cur) {
-        if(id_cmp(cur->data->id, id) == 0) {
-            if(confirm || cur->data->time < now.tv_sec - 15 * 60) {
-                /* Known node.  Update stuff. */
-                memcpy((struct sockaddr*)&cur->data->ss, sa, salen);
-                if(confirm)
-                    cur->data->time = now.tv_sec;
-                if(confirm >= 2) {
-                    cur->data->reply_time = now.tv_sec;
-                    cur->data->pinged = 0;
-                    cur->data->pinged_time = now.tv_sec;
-                }
-            }
-            return cur->data;
-        }
-        cur = cur->next;
-    }
-
-    /* New node. */
-    /* Always Create a new node. to keep the statistic of bad ones*/
-    n = calloc(1, sizeof(struct node));
-    if(n == NULL)
-        return NULL;
-    memcpy(n->id, id, 20);
-    memcpy(&n->ss, sa, salen);
-    n->sslen = salen;
-    n->time = confirm ? now.tv_sec : 0;
-    n->reply_time = confirm >= 2 ? now.tv_sec : 0;
-    n->pinged_time=0;
-    n->pinged=0;
-    n->next = NULL;
-    cur = (struct list_el *)malloc(sizeof(struct list_el));
-    cur->data = n;
-    if (head == NULL){
-        head = cur;
-        tail = head;
-        head->next = NULL;
-        head->previous = NULL;
-    }
-    else{
-        cur->data = n;
-        cur->previous = tail;
-        tail->next=cur;
-        cur->next = NULL;
-        tail = cur;
-    }
-    return n;
-}
-
-int get_list_stat(int lim4, struct sockaddr_in *sin, int *num, int numbad,
-                  int lim6, struct sockaddr_in6 *sin6, int *num6, int numbad6)
+int get_list_stat(int lim4, struct sockaddr_in *sin, int *num, int *numbad,
+                  int lim6, struct sockaddr_in6 *sin6, int *num6, int *numbad6)
 {
     int i, j, badi, badj;
     struct list_el *cur;
@@ -3440,4 +3450,32 @@ int explore_tree()
         cur = cur->next;
     }
     return 1;
+}
+
+int list_request()
+{
+    struct node* n;
+    struct list_el *cur;
+    cur = head;
+    unsigned char id2[20];
+    memcpy(id2, myid, 20);
+    int k;
+    for (k=0; k < 20; ++k){
+        id2[k] = random() & 0xFF;
+    }
+    while (cur){
+        n = cur->data;
+        if(n) {
+            unsigned char tid[4];
+            char mybuf[200];
+            printIP((struct sockaddr*)&n->ss, mybuf);
+            debugf("Sending find_node to explore_tree to %s.\n", mybuf);
+            make_tid(tid, "fn", 0);
+            send_find_node((struct sockaddr*)&n->ss, n->sslen,
+                           tid, 4, id2, 3,
+                           n->reply_time >= now.tv_sec - 15);
+        }
+        cur= cur->next;
+    }
+    return 0;
 }
